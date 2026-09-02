@@ -1,4 +1,4 @@
-import { strFromU8, strToU8, unzip, zip, type AsyncZippable, type Unzipped } from 'fflate';
+import { strFromU8, strToU8, unzip, unzipSync, zip, type AsyncZippable, type Unzipped } from 'fflate';
 import { TEMPERA_MAX_LAYER_IMAGES, type TemperaLayerImage } from '../types';
 import {
     getTemperaLayerImage,
@@ -25,6 +25,33 @@ import {
 
 const ARCHIVE_KIND = 'folia-tempera-pool';
 const SCHEMA_VERSION = 1;
+
+// 解压后总大小上限。超过即视为损坏或压缩炸弹并拒绝导入，避免把整个 zip 一次性
+// inflate 进内存（实测 51KB 的 zip 可产出 50MB 字节，令浏览器瞬间吃掉数百 MB）。
+const TEMPERA_ARCHIVE_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024; // 512 MB
+
+/** 备份解压后预计超过上限时抛出，UI 据此显示警告并取消导入。 */
+export class TemperaArchiveTooLargeError extends Error {
+    constructor() {
+        super('Tempera pool backup is too large to import');
+        this.name = 'TemperaArchiveTooLargeError';
+    }
+}
+
+/**
+ * 只解析 zip 中央目录、对每条目的 originalSize 求和，不做任何解压：filter 始终返回
+ * false，fflate 因此不会 inflate 任何条目。返回解压后的总字节数。
+ */
+const probeUncompressedSize = (bytes: Uint8Array): number => {
+    let total = 0;
+    unzipSync(bytes, {
+        filter: file => {
+            total += file.originalSize;
+            return false;
+        },
+    });
+    return total;
+};
 
 export interface TemperaImagePoolSnapshot {
     layerImages: TemperaLayerImage[];
@@ -165,7 +192,15 @@ export const readTemperaImageArchiveFile = async (
     options: { existing: TemperaLayerImage[]; maxImages?: number },
 ): Promise<TemperaImageArchiveImportResult> => {
     const maxImages = options.maxImages ?? TEMPERA_MAX_LAYER_IMAGES;
-    const files = await runUnzip(new Uint8Array(await file.arrayBuffer()));
+    const bytes = new Uint8Array(await file.arrayBuffer());
+
+    // 解压前先判断总体积：中央目录里声明的解压后大小之和超过阈值就直接拒绝，
+    // 这样永远不会把整个 zip inflate 进内存。
+    if (probeUncompressedSize(bytes) > TEMPERA_ARCHIVE_MAX_UNCOMPRESSED_BYTES) {
+        throw new TemperaArchiveTooLargeError();
+    }
+
+    const files = await runUnzip(bytes);
     const meta = readJsonEntry(files, 'meta.json') as { kind?: unknown; schemaVersion?: unknown } | null;
     if (!meta || meta.kind !== ARCHIVE_KIND || meta.schemaVersion !== SCHEMA_VERSION) {
         throw new Error('Not a Folia canvas-image backup');

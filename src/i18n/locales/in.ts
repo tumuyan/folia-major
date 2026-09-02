@@ -2390,6 +2390,7 @@ export default {
     "temperaPoolImportTruncated": "{{count}} gambar dilewati: kolam penuh",
     "temperaPoolImportEmpty": "Cadangan ini tidak berisi gambar yang dapat dipakai",
     "temperaPoolImportFailed": "Impor gagal; gunakan zip yang diekspor lewat dialog ini",
+    "temperaPoolImportTooLarge": "Impor dibatalkan: cadangan akan mengembang melebihi 512 MB dan ditolak sebagai arsip yang rusak atau zip-bomb",
     "temperaPoolExported": "Mengekspor {{count}} gambar",
     "temperaPoolExportSkipped": "{{count}} gambar dilewati: berkas tidak ditemukan",
     "temperaPoolExportFailed": "Ekspor gagal"

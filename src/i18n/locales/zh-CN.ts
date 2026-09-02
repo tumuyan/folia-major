@@ -1556,6 +1556,7 @@ export default {
     "temperaPoolImportTruncated": "超出上限，未导入 {{count}} 张",
     "temperaPoolImportEmpty": "这份备份里没有可用的图片",
     "temperaPoolImportFailed": "导入失败，请确认是本功能导出的 zip",
+    "temperaPoolImportTooLarge": "已取消导入：备份解压后预计超过 512 MB，疑似损坏或压缩炸弹",
     "temperaPoolExported": "已导出 {{count}} 张图片",
     "temperaPoolExportSkipped": "{{count}} 张的原文件已丢失，未写入备份",
     "temperaPoolExportFailed": "导出失败",

@@ -13,6 +13,7 @@ import {
 import {
     createTemperaImageArchive,
     readTemperaImageArchiveFile,
+    TemperaArchiveTooLargeError,
 } from '../../../services/temperaImageArchive';
 import { createSafeObjectUrl } from '../../../utils/blobGuards';
 import { setStatusMessage } from '../../../stores/useStatusMessageStore';
@@ -314,7 +315,12 @@ const TemperaImageLayerControls: React.FC<TemperaImageLayerControlsProps> = ({
             setStatusMessage({ type: 'success', text: notes.join(' · ') });
         } catch (error) {
             console.error('[Tempera] canvas image pool import failed:', error);
-            setStatusMessage({ type: 'error', text: t('options.temperaPoolImportFailed') || '导入失败' });
+            setStatusMessage({
+                type: 'error',
+                text: error instanceof TemperaArchiveTooLargeError
+                    ? (t('options.temperaPoolImportTooLarge') || '已取消导入：备份解压后预计超过 512 MB，疑似损坏或压缩炸弹')
+                    : (t('options.temperaPoolImportFailed') || '导入失败'),
+            });
         } finally {
             setBusy('idle');
         }

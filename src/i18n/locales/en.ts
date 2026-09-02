@@ -1554,6 +1554,7 @@ export default {
     "temperaPoolImportTruncated": "{{count}} image(s) left out: the pool is full",
     "temperaPoolImportEmpty": "This backup holds no usable image",
     "temperaPoolImportFailed": "Import failed; use a zip exported by this dialog",
+    "temperaPoolImportTooLarge": "Import cancelled: the backup would expand to over 512 MB and was rejected as a possible corrupted or zip-bomb archive",
     "temperaPoolExported": "Exported {{count}} image(s)",
     "temperaPoolExportSkipped": "{{count}} image(s) left out: the file was missing",
     "temperaPoolExportFailed": "Export failed",
