@@ -277,10 +277,15 @@ const TemperaImageLayerDialog: React.FC<TemperaImageLayerDialogProps> = ({
 
                 {/* The drop hint stays at the bottom of the drop area: the pool can run several
                     screens long when it holds sixteen entries, and a hint that scrolled with the
-                    list would be off-screen exactly when a file is being dragged in. */}
-                <p className="text-xs opacity-50" style={{ color: tokens.textSecondary }}>
-                    {t('options.temperaLayerImageDropHint') || '也可以把文件拖到这里'}
-                </p>
+                    list would be off-screen exactly when a file is being dragged in. Hidden once
+                    the pool is full, because there is then nothing a drop can do - the images
+                    would be refused, and the hint would be promising the opposite. The drop zone
+                    itself stays live: a zip can still replace the whole pool. */}
+                {!full && (
+                    <p className="text-xs opacity-50" style={{ color: tokens.textSecondary }}>
+                        {t('options.temperaLayerImageDropHint') || '也可以把文件拖到这里'}
+                    </p>
+                )}
             </div>
 
             <input

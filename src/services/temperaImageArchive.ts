@@ -1,4 +1,4 @@
-import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
+import { strFromU8, strToU8, unzip, zip, type AsyncZippable, type Unzipped } from 'fflate';
 import { TEMPERA_MAX_LAYER_IMAGES, type TemperaLayerImage } from '../types';
 import {
     getTemperaLayerImage,
@@ -16,6 +16,12 @@ import {
 // carried the artwork would blow its own size budget. So the pool gets a binary sidecar: a zip
 // holding the pool-wide settings plus the original bytes, rebuilt on import through the same
 // `prepareTemperaLayerImage` path a drag-and-drop upload takes, thumbnails included.
+//
+// Compression and decompression run off-thread through fflate's async `zip`/`unzip`: the pool holds
+// up to sixteen images at print resolution, and deflating tens of megabytes on the main thread is
+// long enough to be visible as a stall in the lyric animation that is usually playing behind this
+// dialog. fflate buffers each file into the worker rather than transferring it, so the pool is
+// briefly held twice - the alternative is detaching the bytes the pool is still showing.
 
 const ARCHIVE_KIND = 'folia-tempera-pool';
 const SCHEMA_VERSION = 1;
@@ -24,6 +30,14 @@ export interface TemperaImagePoolSnapshot {
     layerImages: TemperaLayerImage[];
     layerImageDepth: 'back' | 'front';
     layerImageFrequency: number;
+}
+
+export interface TemperaImageArchiveExportResult {
+    blob: Blob;
+    /** Placements whose bytes made it into the zip. */
+    exported: number;
+    /** Placements left out because their file was gone from IndexedDB. */
+    skipped: number;
 }
 
 export interface TemperaImageArchiveImportResult {
@@ -55,7 +69,7 @@ const entryPath = (image: { id: string; name: string }, mimeType: string) => {
     return `images/${image.id}.${extension}`;
 };
 
-const readJsonEntry = (files: Record<string, Uint8Array>, path: string): unknown => {
+const readJsonEntry = (files: Unzipped, path: string): unknown => {
     const file = files[path];
     if (!file) throw new Error(`Tempera pool zip is missing ${path}`);
     return JSON.parse(strFromU8(file));
@@ -68,13 +82,28 @@ const asFrequency = (value: unknown) => (
 );
 
 /**
- * Reads the whole pool - settings and files - into a zip Blob. Entries whose file has gone
- * missing are dropped from the manifest instead of producing a zip with holes in it: importing
- * that back would restore placements that can never resolve to a picture.
+ * Runs fflate's async entry points as promises. Both hand back a terminator that nothing calls:
+ * a cancelled export leaves the worker to finish and be collected, which is cheaper than tracking
+ * the operation through the dialog's close path.
  */
-export const createTemperaImageArchiveBlob = async (
+const runZip = (files: AsyncZippable): Promise<Uint8Array<ArrayBuffer>> => new Promise((resolve, reject) => {
+    zip(files, { level: 6 }, (error, data) => (error ? reject(error) : resolve(data)));
+});
+
+const runUnzip = (bytes: Uint8Array): Promise<Unzipped> => new Promise((resolve, reject) => {
+    unzip(bytes, (error, files) => (error ? reject(error) : resolve(files)));
+});
+
+/**
+ * Reads the whole pool - settings and files - into a zip. Entries whose file has gone
+ * missing are dropped from the manifest instead of producing a zip with holes in it: importing
+ * that back would restore placements that can never resolve to a picture. The two counts are
+ * returned because a backup that silently holds fewer pictures than the pool shows is worse than
+ * one that says so at the moment it is taken.
+ */
+export const createTemperaImageArchive = async (
     snapshot: TemperaImagePoolSnapshot,
-): Promise<Blob> => {
+): Promise<TemperaImageArchiveExportResult> => {
     const files: Record<string, Uint8Array> = {};
     const keptIds = new Set<string>();
 
@@ -99,18 +128,22 @@ export const createTemperaImageArchiveBlob = async (
         imageCount: ordered.length,
     });
 
-    return new Blob([zipSync(files, { level: 6 })], { type: 'application/zip' });
+    return {
+        blob: new Blob([await runZip(files)], { type: 'application/zip' }),
+        exported: ordered.length,
+        skipped: snapshot.layerImages.length - ordered.length,
+    };
 };
 
 const collectEntries = (
-    files: Record<string, Uint8Array>,
+    files: Unzipped,
     manifest: TemperaLayerImage[],
 ): Array<{ image: TemperaLayerImage; bytes: Uint8Array; mimeType: string }> => {
+    const paths = Object.keys(files);
     const entries: Array<{ image: TemperaLayerImage; bytes: Uint8Array; mimeType: string }> = [];
     manifest.forEach(image => {
-        const path = Object.keys(files).find(name => (
-            name.startsWith(`images/${image.id}.`) && name.length > `images/${image.id}.`.length
-        ));
+        const prefix = `images/${image.id}.`;
+        const path = paths.find(name => name.startsWith(prefix) && name.length > prefix.length);
         if (!path) return;
         const bytes = files[path];
         if (!bytes) return;
@@ -132,7 +165,7 @@ export const readTemperaImageArchiveFile = async (
     options: { existing: TemperaLayerImage[]; maxImages?: number },
 ): Promise<TemperaImageArchiveImportResult> => {
     const maxImages = options.maxImages ?? TEMPERA_MAX_LAYER_IMAGES;
-    const files = unzipSync(new Uint8Array(await file.arrayBuffer()));
+    const files = await runUnzip(new Uint8Array(await file.arrayBuffer()));
     const meta = readJsonEntry(files, 'meta.json') as { kind?: unknown; schemaVersion?: unknown } | null;
     if (!meta || meta.kind !== ARCHIVE_KIND || meta.schemaVersion !== SCHEMA_VERSION) {
         throw new Error('Not a Folia canvas-image backup');
@@ -152,14 +185,19 @@ export const readTemperaImageArchiveFile = async (
     let truncated = 0;
 
     const layerImages: TemperaLayerImage[] = [];
-    for (const entry of entries) {
+    for (let index = 0; index < entries.length; index += 1) {
         // A pool-size change means an older backup can hold more entries than fit now; those are
-        // dropped rather than silently overflowing the pool.
+        // dropped rather than silently overflowing the pool. Counted off the loop index rather
+        // than `entries.indexOf(entry)`: indexOf matches by object identity, so it only reports
+        // the right position while `collectEntries` happens to mint a fresh object per row - and
+        // the tail it names is the resolvable entries, not the manifest rows, which is the number
+        // the user is actually missing.
         if (layerImages.length + options.existing.length >= maxImages) {
-            truncated = entries.length - entries.indexOf(entry);
+            truncated = entries.length - index;
             break;
         }
 
+        const entry = entries[index];
         // The id travelled with the file, so importing the same backup twice would have the
         // second copy overwrite the first in IndexedDB instead of sitting next to it. A colliding
         // id is therefore minted afresh, leaving the existing record untouched.

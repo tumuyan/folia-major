@@ -1,11 +1,13 @@
+import { strFromU8, strToU8 } from 'fflate';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-    createTemperaImageArchiveBlob,
+    createTemperaImageArchive,
     readTemperaImageArchiveFile,
 } from '@/services/temperaImageArchive';
 
 // test/unit/services/temperaImageArchive.test.ts
-// Covers the pool zip: settings round-trip, id remapping on a second import, and the pool cap.
+// Covers the pool zip: settings round-trip, id remapping on a second import, the pool cap, and the
+// counts the dialog turns into a status message.
 
 const mocks = vi.hoisted(() => ({
     getTemperaLayerImage: vi.fn(),
@@ -52,13 +54,17 @@ describe('tempera image archive', () => {
             id === 'kept' ? storedImage('kept', 'kept.png') : null
         ));
 
-        const blob = await createTemperaImageArchiveBlob({
+        const archive = await createTemperaImageArchive({
             layerImages: [placement('kept'), placement('lost')],
             layerImageDepth: 'front',
             layerImageFrequency: 0.25,
         });
+        // A placement with no file is reported, not quietly dropped: the pool shows 2 and the
+        // backup can only restore 1.
+        expect(archive.exported).toBe(1);
+        expect(archive.skipped).toBe(1);
         const result = await readTemperaImageArchiveFile(
-            new File([blob], 'pool.zip', { type: 'application/zip' }),
+            new File([archive.blob], 'pool.zip', { type: 'application/zip' }),
             { existing: [] },
         );
 
@@ -89,18 +95,18 @@ describe('tempera image archive', () => {
 
     it('mints a fresh id when the same backup is imported twice', async () => {
         mocks.getTemperaLayerImage.mockImplementation(async (id: string) => storedImage(id, `${id}.png`));
-        const blob = await createTemperaImageArchiveBlob({
+        const archive = await createTemperaImageArchive({
             layerImages: [placement('first')],
             layerImageDepth: 'back',
             layerImageFrequency: 0,
         });
 
         const first = await readTemperaImageArchiveFile(
-            new File([blob], 'pool.zip', { type: 'application/zip' }),
+            new File([archive.blob], 'pool.zip', { type: 'application/zip' }),
             { existing: [] },
         );
         const second = await readTemperaImageArchiveFile(
-            new File([blob], 'pool.zip', { type: 'application/zip' }),
+            new File([archive.blob], 'pool.zip', { type: 'application/zip' }),
             { existing: first.layerImages },
         );
 
@@ -111,19 +117,69 @@ describe('tempera image archive', () => {
 
     it('reports the entries it had to leave out when the pool is full', async () => {
         mocks.getTemperaLayerImage.mockImplementation(async (id: string) => storedImage(id, `${id}.png`));
-        const blob = await createTemperaImageArchiveBlob({
+        const archive = await createTemperaImageArchive({
             layerImages: [placement('a'), placement('b'), placement('c')],
             layerImageDepth: 'back',
             layerImageFrequency: 0,
         });
 
         const result = await readTemperaImageArchiveFile(
-            new File([blob], 'pool.zip', { type: 'application/zip' }),
+            new File([archive.blob], 'pool.zip', { type: 'application/zip' }),
             { existing: [placement('taken')], maxImages: 2 },
         );
 
         expect(result.layerImages).toHaveLength(1);
         expect(result.truncated).toBe(2);
+    });
+
+    it('counts the resolvable tail, not the manifest rows, as left out', async () => {
+        mocks.getTemperaLayerImage.mockImplementation(async (id: string) => (
+            id === 'ghost' ? null : storedImage(id, `${id}.png`)
+        ));
+        const archive = await createTemperaImageArchive({
+            layerImages: [placement('a'), placement('b'), placement('ghost')],
+            layerImageDepth: 'back',
+            layerImageFrequency: 0,
+        });
+        // The exported zip lists two placements, so a manifest of two plus one ghost is the same
+        // pool this dialog produces. `unzipSync` then `zipSync` would normalise it away, so the
+        // archive is edited here instead.
+        const { unzipSync, zipSync } = await import('fflate');
+        const files = unzipSync(new Uint8Array(await archive.blob.arrayBuffer()));
+        const pool = JSON.parse(strFromU8(files['pool.json'])) as {
+            layerImages: ReturnType<typeof placement>[];
+            layerImageDepth: string;
+            layerImageFrequency: number;
+        };
+        files['pool.json'] = strToU8(JSON.stringify({
+            ...pool,
+            layerImages: [...pool.layerImages, placement('ghost')],
+        }));
+        const edited = new Blob([zipSync(files)], { type: 'application/zip' });
+
+        const result = await readTemperaImageArchiveFile(
+            new File([edited], 'pool.zip', { type: 'application/zip' }),
+            { existing: [], maxImages: 1 },
+        );
+
+        // One of the two real pictures fits, so exactly one is left out. Counting manifest rows
+        // would have reported two, and `indexOf` would have reported nothing at all.
+        expect(result.layerImages).toHaveLength(1);
+        expect(result.truncated).toBe(1);
+        expect(result.skipped).toBe(1);
+    });
+
+    it('reports an empty export instead of producing a zip that restores nothing', async () => {
+        mocks.getTemperaLayerImage.mockResolvedValue(null);
+
+        const archive = await createTemperaImageArchive({
+            layerImages: [placement('gone')],
+            layerImageDepth: 'back',
+            layerImageFrequency: 0,
+        });
+
+        expect(archive.exported).toBe(0);
+        expect(archive.skipped).toBe(1);
     });
 
     it('rejects a zip that is not a pool backup', async () => {

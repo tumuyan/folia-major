@@ -8,9 +8,10 @@ import {
     isSupportedTemperaLayerImageFile,
     prepareTemperaLayerImage,
     saveTemperaLayerImage,
+    type StoredTemperaLayerImage,
 } from '../../../services/temperaLayerImages';
 import {
-    createTemperaImageArchiveBlob,
+    createTemperaImageArchive,
     readTemperaImageArchiveFile,
 } from '../../../services/temperaImageArchive';
 import { createSafeObjectUrl } from '../../../utils/blobGuards';
@@ -102,24 +103,75 @@ const TemperaImageLayerControls: React.FC<TemperaImageLayerControlsProps> = ({
     isOpenRef.current = isDialogOpen;
     useEffect(() => () => { if (isOpenRef.current) commitRef.current(); }, []);
 
+    // Files the pool cannot take are invisible otherwise: the strip looks exactly as it did, so
+    // "three of your five files went in" has to be said rather than inferred.
+    const reportAddResult = useCallback((added: number, unsupported: number, overCap: number) => {
+        const notes: string[] = [t('options.temperaLayerImagesAdded', {
+            defaultValue: '已添加 {{count}} 张图片',
+            count: added,
+        })];
+        if (unsupported > 0) {
+            notes.push(t('options.temperaLayerImageUnsupported', {
+                defaultValue: '{{count}} 个文件不是图片池支持的格式',
+                count: unsupported,
+            }));
+        }
+        if (overCap > 0) {
+            notes.push(t('options.temperaPoolImportTruncated', {
+                defaultValue: '超出上限，未导入 {{count}} 张',
+                count: overCap,
+            }));
+        }
+        setStatusMessage({ type: 'success', text: notes.join(' · ') });
+    }, [t]);
+
     const handleFiles = useCallback(async (files: File[]) => {
-        const room = TEMPERA_MAX_LAYER_IMAGES - draft.layerImages.length;
-        const accepted = files.filter(isSupportedTemperaLayerImageFile).slice(0, Math.max(0, room));
-        if (accepted.length === 0) return;
-        const stored = await Promise.all(accepted.map(prepareTemperaLayerImage));
-        await Promise.all(stored.map(saveTemperaLayerImage));
+        if (files.length === 0) return;
+        const room = Math.max(0, TEMPERA_MAX_LAYER_IMAGES - draft.layerImages.length);
+        const supported = files.filter(isSupportedTemperaLayerImageFile);
+        const accepted = supported.slice(0, room);
+        if (accepted.length === 0) {
+            // Nothing went in at all, so there is no partial success to soften it with.
+            setStatusMessage({
+                type: 'error',
+                text: t('options.temperaLayerImageUnsupported', {
+                    defaultValue: '{{count}} 个文件不是图片池支持的格式',
+                    count: files.length,
+                }),
+            });
+            return;
+        }
+        const stored = await Promise.all(accepted.map(file => (
+            prepareTemperaLayerImage(file).catch(error => {
+                console.error('[Tempera] canvas image could not be stored:', error);
+                return null;
+            })
+        )));
+        const saved = stored.filter((image): image is StoredTemperaLayerImage => image !== null);
+        await Promise.all(saved.map(image => (
+            saveTemperaLayerImage(image).catch(error => {
+                console.error('[Tempera] canvas image could not be saved:', error);
+            })
+        )));
         setDraft(current => ({
             ...current,
             layerImages: [
                 ...current.layerImages,
-                ...stored.map(image => ({
+                ...saved.map(image => ({
                     ...DEFAULT_TEMPERA_LAYER_IMAGE,
                     id: image.id,
                     name: image.name,
                 })),
             ].slice(0, TEMPERA_MAX_LAYER_IMAGES),
         }));
-    }, [draft.layerImages.length]);
+        reportAddResult(
+            saved.length,
+            files.length - supported.length,
+            // A file that failed to decode is not "over the cap" - it was accepted and then lost -
+            // but the tail that never got processed is, and that is what this counts.
+            accepted.length - saved.length,
+        );
+    }, [draft.layerImages.length, reportAddResult, t]);
 
     const patch = useCallback((id: string, next: Partial<TemperaLayerImage>) => {
         setDraft(current => ({
@@ -147,12 +199,13 @@ const TemperaImageLayerControls: React.FC<TemperaImageLayerControlsProps> = ({
     const exportPool = useCallback(async () => {
         setBusy('exporting');
         try {
-            const blob = await createTemperaImageArchiveBlob({
+            const archive = await createTemperaImageArchive({
                 layerImages: draft.layerImages,
                 layerImageDepth: draft.layerImageDepth,
                 layerImageFrequency: draft.layerImageFrequency,
             });
-            const url = createSafeObjectUrl(blob);
+            if (archive.exported === 0) throw new Error('Tempera pool export held no image');
+            const url = createSafeObjectUrl(archive.blob);
             if (!url) throw new TypeError('Tempera pool export must produce a Blob');
             const link = document.createElement('a');
             link.href = url;
@@ -165,7 +218,23 @@ const TemperaImageLayerControls: React.FC<TemperaImageLayerControlsProps> = ({
             link.click();
             link.remove();
             window.setTimeout(() => URL.revokeObjectURL(url), 0);
-        } catch {
+
+            // A picture whose file has gone missing is left out of the zip, so the count the
+            // pool shows and the one the backup holds can differ; say so instead of letting the
+            // user discover it on a restore.
+            const notes = [t('options.temperaPoolExported', {
+                defaultValue: '已导出 {{count}} 张图片',
+                count: archive.exported,
+            })];
+            if (archive.skipped > 0) {
+                notes.push(t('options.temperaPoolExportSkipped', {
+                    defaultValue: '{{count}} 张的原文件已丢失，未写入备份',
+                    count: archive.skipped,
+                }));
+            }
+            setStatusMessage({ type: 'success', text: notes.join(' · ') });
+        } catch (error) {
+            console.error('[Tempera] canvas image pool export failed:', error);
             setStatusMessage({ type: 'error', text: t('options.temperaPoolExportFailed') || '导出失败' });
         } finally {
             setBusy('idle');
@@ -188,8 +257,27 @@ const TemperaImageLayerControls: React.FC<TemperaImageLayerControlsProps> = ({
             const result = await readTemperaImageArchiveFile(file, {
                 existing: mode === 'append' ? draft.layerImages : [],
             });
+            // A backup that yields nothing is a failure the user has to hear about, but there are
+            // two very different reasons for it: a pool that was already full when the zip landed
+            // (every entry was counted as left out) and a zip that simply held no picture worth
+            // restoring. Saying "no usable image" for the first would send the user looking for a
+            // better backup when the fix is to make room.
             if (result.layerImages.length === 0) {
-                throw new Error('empty');
+                console.warn('[Tempera] canvas image pool import added nothing', {
+                    file: file.name,
+                    skipped: result.skipped,
+                    truncated: result.truncated,
+                });
+                setStatusMessage({
+                    type: 'error',
+                    text: result.truncated > 0
+                        ? t('options.temperaPoolImportTruncated', {
+                            defaultValue: '超出上限，未导入 {{count}} 张',
+                            count: result.truncated,
+                        })
+                        : (t('options.temperaPoolImportEmpty') || '这份备份里没有可用的图片'),
+                });
+                return;
             }
 
             // Replacing the pool drops the old blobs here rather than through `removedIds`,
@@ -223,8 +311,9 @@ const TemperaImageLayerControls: React.FC<TemperaImageLayerControlsProps> = ({
                     count: result.truncated,
                 }));
             }
-            setStatusMessage({ type: 'info', text: notes.join(' · ') });
-        } catch {
+            setStatusMessage({ type: 'success', text: notes.join(' · ') });
+        } catch (error) {
+            console.error('[Tempera] canvas image pool import failed:', error);
             setStatusMessage({ type: 'error', text: t('options.temperaPoolImportFailed') || '导入失败' });
         } finally {
             setBusy('idle');
