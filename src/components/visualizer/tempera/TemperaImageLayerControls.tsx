@@ -9,7 +9,14 @@ import {
     prepareTemperaLayerImage,
     saveTemperaLayerImage,
 } from '../../../services/temperaLayerImages';
-import TemperaImageLayerDialog from './TemperaImageLayerDialog';
+import {
+    createTemperaImageArchiveBlob,
+    readTemperaImageArchiveFile,
+} from '../../../services/temperaImageArchive';
+import { createSafeObjectUrl } from '../../../utils/blobGuards';
+import { setStatusMessage } from '../../../stores/useStatusMessageStore';
+import { formatLocalDateStamp, sanitizeDownloadFileName } from '../../../utils/downloadFileName';
+import TemperaImageLayerDialog, { type TemperaPoolBusyAction } from './TemperaImageLayerDialog';
 import { useTemperaLayerImageThumbnails } from './useTemperaLayerImageThumbnails';
 
 // src/components/visualizer/tempera/TemperaImageLayerControls.tsx
@@ -65,6 +72,7 @@ const TemperaImageLayerControls: React.FC<TemperaImageLayerControlsProps> = ({
     // Files deleted in the draft. The record is only dropped from IndexedDB on commit, so a
     // removal is undone by simply not committing it.
     const [removedIds, setRemovedIds] = useState<string[]>([]);
+    const [busy, setBusy] = useState<TemperaPoolBusyAction>('idle');
 
     const previewImages = isDialogOpen ? draft.layerImages : images;
     const thumbnails = useTemperaLayerImageThumbnails(previewImages);
@@ -136,6 +144,93 @@ const TemperaImageLayerControls: React.FC<TemperaImageLayerControlsProps> = ({
         ])));
     }, [draft.layerImages]);
 
+    const exportPool = useCallback(async () => {
+        setBusy('exporting');
+        try {
+            const blob = await createTemperaImageArchiveBlob({
+                layerImages: draft.layerImages,
+                layerImageDepth: draft.layerImageDepth,
+                layerImageFrequency: draft.layerImageFrequency,
+            });
+            const url = createSafeObjectUrl(blob);
+            if (!url) throw new TypeError('Tempera pool export must produce a Blob');
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `${sanitizeDownloadFileName(
+                // Falls back to the shipped Chinese name: the key is new and a stale locale
+                // file would otherwise name the file after the raw key.
+                t('options.temperaExportBaseName') || '凝彩参数-画布图片备份',
+            )}-${formatLocalDateStamp()}.zip`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.setTimeout(() => URL.revokeObjectURL(url), 0);
+        } catch {
+            setStatusMessage({ type: 'error', text: t('options.temperaPoolExportFailed') || '导出失败' });
+        } finally {
+            setBusy('idle');
+        }
+    }, [draft.layerImageDepth, draft.layerImageFrequency, draft.layerImages, t]);
+
+    const importPool = useCallback(async (file: File, mode: 'replace' | 'append') => {
+        // Replace wipes the current pool, and the only confirmation is here: the dialog has no
+        // closing state to lose, but the IndexedDB records it drops are gone for good.
+        if (mode === 'replace' && draft.layerImages.length > 0
+            && !window.confirm(t('options.temperaImportConfirmReplace', {
+                defaultValue: '替换导入会先清空当前 {{count}} 张图片，确定继续？',
+                count: draft.layerImages.length,
+            }))) {
+            return;
+        }
+
+        setBusy('importing');
+        try {
+            const result = await readTemperaImageArchiveFile(file, {
+                existing: mode === 'append' ? draft.layerImages : [],
+            });
+            if (result.layerImages.length === 0) {
+                throw new Error('empty');
+            }
+
+            // Replacing the pool drops the old blobs here rather than through `removedIds`,
+            // because those files have to go even if the user never commits the dialog.
+            if (mode === 'replace') {
+                await Promise.all(draft.layerImages.map(image => (
+                    clearTemperaLayerImage(image.id).catch(() => undefined)
+                )));
+                setRemovedIds([]);
+            }
+
+            setDraft(current => ({
+                layerImages: (mode === 'append' ? current.layerImages : []).concat(result.layerImages),
+                layerImageDepth: result.layerImageDepth,
+                layerImageFrequency: result.layerImageFrequency,
+            }));
+
+            const notes: string[] = [t('options.temperaPoolImported', {
+                defaultValue: '已导入 {{count}} 张图片',
+                count: result.layerImages.length,
+            })];
+            if (result.skipped > 0) {
+                notes.push(t('options.temperaPoolImportSkipped', {
+                    defaultValue: '跳过 {{count}} 个无效文件',
+                    count: result.skipped,
+                }));
+            }
+            if (result.truncated > 0) {
+                notes.push(t('options.temperaPoolImportTruncated', {
+                    defaultValue: '超出上限，未导入 {{count}} 张',
+                    count: result.truncated,
+                }));
+            }
+            setStatusMessage({ type: 'info', text: notes.join(' · ') });
+        } catch {
+            setStatusMessage({ type: 'error', text: t('options.temperaPoolImportFailed') || '导入失败' });
+        } finally {
+            setBusy('idle');
+        }
+    }, [draft.layerImages, t]);
+
     return (
         <div className="space-y-3">
             {/* The hint gets the panel's full width. Inside the button it had to share the row
@@ -188,7 +283,11 @@ const TemperaImageLayerControls: React.FC<TemperaImageLayerControlsProps> = ({
                 <span className="ml-auto shrink-0 text-sm" style={{ color: 'var(--text-primary)' }}>
                     {images.length === 0
                         ? (t('options.temperaAddLayerImage') || '添加图片')
-                        : `${images.length} / ${TEMPERA_MAX_LAYER_IMAGES}`}
+                        : t('options.temperaImagePoolCount', {
+                            defaultValue: '{{count}} / {{max}}',
+                            count: images.length,
+                            max: TEMPERA_MAX_LAYER_IMAGES,
+                        })}
                 </span>
                 <Settings2 size={16} className="shrink-0 opacity-50" style={{ color: 'var(--text-secondary)' }} />
             </button>
@@ -210,6 +309,9 @@ const TemperaImageLayerControls: React.FC<TemperaImageLayerControlsProps> = ({
                 onClearAll={clearAll}
                 onDepthChange={layerImageDepth => setDraft(current => ({ ...current, layerImageDepth }))}
                 onFrequencyChange={layerImageFrequency => setDraft(current => ({ ...current, layerImageFrequency }))}
+                onImportPool={(file, mode) => void importPool(file, mode)}
+                onExportPool={() => void exportPool()}
+                busy={busy}
             />
         </div>
     );
