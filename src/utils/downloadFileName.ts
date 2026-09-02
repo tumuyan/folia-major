@@ -17,3 +17,14 @@ export const formatLocalDateStamp = (date = new Date()): string => {
     const day = `${date.getDate()}`.padStart(2, '0');
     return `${date.getFullYear()}-${month}-${day}`;
 };
+
+/** Local `YYYY-MM-DD-HH-MM-SS`, not UTC-derived `toISOString`: it matches the user's wall clock and is filename-safe. */
+export const formatLocalDateTimeStamp = (date = new Date()): string => {
+    const pad = (n: number): string => `${n}`.padStart(2, '0');
+    const month = pad(date.getMonth() + 1);
+    const day = pad(date.getDate());
+    const hours = pad(date.getHours());
+    const minutes = pad(date.getMinutes());
+    const seconds = pad(date.getSeconds());
+    return `${date.getFullYear()}-${month}-${day}-${hours}-${minutes}-${seconds}`;
+};

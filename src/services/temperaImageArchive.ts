@@ -87,14 +87,12 @@ const EXTENSION_BY_MIME: Record<string, string> = {
 
 const encodeJson = (value: unknown) => strToU8(JSON.stringify(value, null, 2));
 
-/** Rebuilds the on-disk name of an entry, falling back to the mime type for extension-less ids. */
-const entryPath = (image: { id: string; name: string }, mimeType: string) => {
-    const declared = image.name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1];
-    const extension = declared && /^[a-z0-9]{1,5}$/.test(declared)
-        ? declared
-        : (EXTENSION_BY_MIME[mimeType] ?? 'bin');
-    return `images/${image.id}.${extension}`;
-};
+/**
+ * Rebuilds the on-disk name of an entry. The id already embeds the original file name
+ * (including its extension, e.g. `12345-photo.png`), so the entry is exactly `images/${id}`
+ * with no extra suffix appended.
+ */
+const entryPath = (image: { id: string }) => `images/${image.id}`;
 
 const readJsonEntry = (files: Unzipped, path: string): unknown => {
     const file = files[path];
@@ -137,7 +135,7 @@ export const createTemperaImageArchive = async (
     await Promise.all(snapshot.layerImages.map(async image => {
         const stored = await getTemperaLayerImage(image.id).catch(() => null);
         if (!stored?.blob) return;
-        files[entryPath(image, stored.mimeType)] = new Uint8Array(await stored.blob.arrayBuffer());
+        files[entryPath(image)] = new Uint8Array(await stored.blob.arrayBuffer());
         keptIds.add(image.id);
     }));
 
@@ -169,8 +167,8 @@ const collectEntries = (
     const paths = Object.keys(files);
     const entries: Array<{ image: TemperaLayerImage; bytes: Uint8Array; mimeType: string }> = [];
     manifest.forEach(image => {
-        const prefix = `images/${image.id}.`;
-        const path = paths.find(name => name.startsWith(prefix) && name.length > prefix.length);
+        const prefix = `images/${image.id}`;
+        const path = paths.find(name => name === prefix);
         if (!path) return;
         const bytes = files[path];
         if (!bytes) return;
