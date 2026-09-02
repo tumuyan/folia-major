@@ -161,14 +161,54 @@ const TemperaImageLayerDialog: React.FC<TemperaImageLayerDialogProps> = ({
                 </button>
             )}
             footer={(
-                <button
-                    type="button"
-                    onClick={onClose}
-                    className={`rounded-full border px-5 py-2 text-sm transition-colors ${tokens.hoverSurfaceClass}`}
-                    style={{ color: tokens.textPrimary, borderColor: tokens.line }}
-                >
-                    {t('options.temperaLayerImageSave') || '保存'}
-                </button>
+                <div className="flex w-full flex-wrap items-center gap-2">
+                    <PoolAction
+                        label={t('options.temperaAddLayerImage') || '添加图片'}
+                        icon={<ImagePlus size={14} />}
+                        tokens={tokens}
+                        disabled={full || busy !== 'idle'}
+                        onClick={() => fileInputRef.current?.click()}
+                    />
+                    <PoolAction
+                        label={t('options.temperaImportAppendImages') || '追加导入'}
+                        icon={<Plus size={14} />}
+                        tokens={tokens}
+                        disabled={full || busy !== 'idle'}
+                        onClick={() => openImportPicker('append')}
+                    />
+                    <PoolAction
+                        label={t('options.temperaImportReplaceImages') || '替换导入'}
+                        icon={<Replace size={14} />}
+                        tokens={tokens}
+                        disabled={busy !== 'idle'}
+                        onClick={() => openImportPicker('replace')}
+                    />
+                    <PoolAction
+                        label={t('options.temperaExportImages') || '导出'}
+                        icon={<Download size={14} />}
+                        tokens={tokens}
+                        disabled={images.length === 0 || busy !== 'idle'}
+                        spinning={busy === 'exporting'}
+                        onClick={onExportPool}
+                    />
+                    <span className="ml-auto flex items-center gap-3">
+                        <span className="text-xs opacity-60" style={{ color: tokens.textSecondary }}>
+                            {t('options.temperaImagePoolCount', {
+                                defaultValue: '{{count}} / {{max}}',
+                                count: images.length,
+                                max: maxImages,
+                            })}
+                        </span>
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className={`rounded-full border px-5 py-2 text-sm transition-colors ${tokens.hoverSurfaceClass}`}
+                            style={{ color: tokens.textPrimary, borderColor: tokens.line }}
+                        >
+                            {t('options.temperaLayerImageSave') || '保存'}
+                        </button>
+                    </span>
+                </div>
             )}
         >
             <div
@@ -235,57 +275,12 @@ const TemperaImageLayerDialog: React.FC<TemperaImageLayerDialogProps> = ({
                     )}
                 </div>
 
-                {/* Pinned below the scroll area: with the pool holding sixteen entries the list
-                    runs several screens long, and an upload control that scrolled with it meant
-                    scrolling back to the top for every file. */}
-                <div
-                    className="flex flex-wrap items-center gap-2 border-t pt-3"
-                    style={{ borderColor: tokens.line, ...temperaDialogTextVars(tokens) }}
-                >
-                    <span className="flex flex-col gap-0.5 text-xs">
-                        <span style={{ color: tokens.textPrimary }}>
-                            {t('options.temperaImagePoolCount', {
-                                defaultValue: '{{count}} / {{max}}',
-                                count: images.length,
-                                max: maxImages,
-                            })}
-                        </span>
-                        <span className="opacity-50" style={{ color: tokens.textSecondary }}>
-                            {t('options.temperaLayerImageDropHint') || '也可以把文件拖到这里'}
-                        </span>
-                    </span>
-                    <span className="ml-auto flex flex-wrap items-center gap-2">
-                        <PoolAction
-                            label={t('options.temperaAddLayerImage') || '添加图片'}
-                            icon={<ImagePlus size={14} />}
-                            tokens={tokens}
-                            disabled={full || busy !== 'idle'}
-                            onClick={() => fileInputRef.current?.click()}
-                        />
-                        <PoolAction
-                            label={t('options.temperaImportAppendImages') || '追加导入'}
-                            icon={<Plus size={14} />}
-                            tokens={tokens}
-                            disabled={full || busy !== 'idle'}
-                            onClick={() => openImportPicker('append')}
-                        />
-                        <PoolAction
-                            label={t('options.temperaImportReplaceImages') || '替换导入'}
-                            icon={<Replace size={14} />}
-                            tokens={tokens}
-                            disabled={busy !== 'idle'}
-                            onClick={() => openImportPicker('replace')}
-                        />
-                        <PoolAction
-                            label={t('options.temperaExportImages') || '导出'}
-                            icon={<Download size={14} />}
-                            tokens={tokens}
-                            disabled={images.length === 0 || busy !== 'idle'}
-                            spinning={busy === 'exporting'}
-                            onClick={onExportPool}
-                        />
-                    </span>
-                </div>
+                {/* The drop hint stays at the bottom of the drop area: the pool can run several
+                    screens long when it holds sixteen entries, and a hint that scrolled with the
+                    list would be off-screen exactly when a file is being dragged in. */}
+                <p className="text-xs opacity-50" style={{ color: tokens.textSecondary }}>
+                    {t('options.temperaLayerImageDropHint') || '也可以把文件拖到这里'}
+                </p>
             </div>
 
             <input
